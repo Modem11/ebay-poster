@@ -11,10 +11,8 @@ import db
 
 load_dotenv()
 
-EBAY_TOKEN = os.getenv("EBAY_USER_TOKEN")
-LINE_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-
-line_config = Configuration(access_token=LINE_TOKEN)
+def get_ebay_token():
+    return os.getenv("EBAY_USER_TOKEN", "")
 
 def get_base_url():
     try:
@@ -22,7 +20,7 @@ def get_base_url():
             url = f.read().strip()
             return url.replace("/callback", "")
     except Exception:
-        return "http://localhost:8000"
+        return "https://ebay-poster.onrender.com"
 
 def get_game_and_specifics(title: str) -> dict:
     """
@@ -55,6 +53,10 @@ def get_game_and_specifics(title: str) -> dict:
         specifics["Game"] = "Dragon Ball Super"
         specifics["Franchise"] = "Dragon Ball"
         specifics["Manufacturer"] = "Bandai"
+    elif any(k in t for k in ["naruto", "uzumaki", "sasuke", "kakashi", "นารูโตะ"]):
+        specifics["Game"] = "Naruto CCG"
+        specifics["Franchise"] = "Naruto"
+        specifics["Manufacturer"] = "Bandai"
 
     # ถ้ามีคำว่า English ในชื่อ
     if "english" in t or "eng" in t:
@@ -83,16 +85,14 @@ def map_condition(condition_str: str):
             descriptors.append(("40004", grade_match.group(1)))
         return 2750, descriptors
 
-    # การ์ดดิบ (Ungraded)
-    descriptors = [("40002", "400010")] # Ungraded
+    # การ์ดดิบ (Ungraded) - รหัสสำหรับหมวด 183454
+    descriptors = []
     if "lightly" in c or "lp" in c or "excellent" in c:
-        descriptors.append(("40001", "400011")) # Lightly Played (Excellent)
-    elif "moderately" in c or "mp" in c:
-        descriptors.append(("40001", "400012")) # Moderately Played (Very Good)
-    elif "heavily" in c or "hp" in c:
-        descriptors.append(("40001", "400013")) # Heavily Played (Poor)
-    elif "damaged" in c or "dmg" in c:
-        descriptors.append(("40001", "400014")) # Damaged
+        descriptors.append(("40001", "400015")) # Lightly Played (Excellent)
+    elif "moderately" in c or "mp" in c or "vg" in c:
+        descriptors.append(("40001", "400016")) # Moderately Played (Very Good)
+    elif "heavily" in c or "hp" in c or "damaged" in c or "dmg" in c:
+        descriptors.append(("40001", "400017")) # Heavily Played / Poor
     else:
         # Near Mint or Better (400010)
         descriptors.append(("40001", "400010"))
@@ -101,8 +101,10 @@ def map_condition(condition_str: str):
 
 def notify_line(user_id: str, message: str):
     target_id = user_id if (user_id and user_id != "web_form") else "U65d1bc34fbca88c47dfb4be576cb5218"
+    line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
     try:
-        with ApiClient(line_config) as api:
+        cfg = Configuration(access_token=line_token)
+        with ApiClient(cfg) as api:
             bot = MessagingApi(api)
             bot.push_message(PushMessageRequest(
                 to=target_id,
@@ -114,6 +116,15 @@ def notify_line(user_id: str, message: str):
 def post_item_to_ebay(item_data) -> dict:
     item_id, user_id, title, price, currency, condition, image_paths, status, created_at, post_time = item_data
     base_url = get_base_url()
+
+    # eBay US บังคับใช้สกุลเงิน USD เท่านั้น
+    if currency == "THB":
+        price = round(price / 35.0, 2)
+        if price < 0.99:
+            price = 0.99
+        currency = "USD"
+    elif currency != "USD":
+        currency = "USD"
 
     # รูปภาพ URLs
     images = [img.strip().replace("\\", "/") for img in image_paths.split(";") if img.strip()]
@@ -167,8 +178,26 @@ def post_item_to_ebay(item_data) -> dict:
     </ul>
     """
 
+    current_token = get_ebay_token()
+    auth_credentials_xml = ""
+    headers = {
+        "X-EBAY-API-COMPATIBILITY-LEVEL": "1149",
+        "X-EBAY-API-SITEID": "0",
+        "X-EBAY-API-CALL-NAME": "AddItem",
+        "Content-Type": "text/xml"
+    }
+
+    if current_token.startswith("v^1.1#"):
+        headers["X-EBAY-API-IAF-TOKEN"] = current_token
+    else:
+        auth_credentials_xml = f"""
+  <RequesterCredentials>
+    <eBayAuthToken>{current_token}</eBayAuthToken>
+  </RequesterCredentials>"""
+
     xml_req = f"""<?xml version="1.0" encoding="utf-8"?>
 <AddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  {auth_credentials_xml}
   <Item>
     <Title>{ebay_title}</Title>
     <Description><![CDATA[{description}]]></Description>
@@ -208,14 +237,6 @@ def post_item_to_ebay(item_data) -> dict:
     </ShippingDetails>
   </Item>
 </AddItemRequest>"""
-
-    headers = {
-        "X-EBAY-API-COMPATIBILITY-LEVEL": "1149",
-        "X-EBAY-API-SITEID": "0",
-        "X-EBAY-API-CALL-NAME": "AddItem",
-        "X-EBAY-API-IAF-TOKEN": EBAY_TOKEN,
-        "Content-Type": "text/xml"
-    }
 
     try:
         r = requests.post("https://api.ebay.com/ws/api.dll", headers=headers, data=xml_req.encode("utf-8"), timeout=60)
