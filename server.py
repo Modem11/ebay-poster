@@ -48,12 +48,13 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 LIFF_URL = "https://liff.line.me/2012509962-djqQR7a0"
 BASE_URL = "https://ebay-poster.onrender.com"
+DEFAULT_USER_ID = "U65d1bc34fbca88c47dfb4be576cb5218"
 
 db.init_db()
 
 app = FastAPI(title="eBay Auto Poster LINE Bot")
 
-# เปิดให้ eBay เข้ามาดึงรูปภาพได้
+# เปิดให้ดึงรูปภาพ
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 def get_form_path():
@@ -63,7 +64,17 @@ def get_form_path():
         return "templates/form.html"
     return "form.html"
 
-# เริ่มระบบ eBay Auto Poster อัตโนมัติในเบื้องหลัง
+# ตรวจดูรายการทั้งหมดผ่านเบราว์เซอร์
+@app.get("/api/all-items")
+def get_all_items():
+    conn = db.sqlite3.connect(db.DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, title, price, currency, condition, status, created_at, post_time FROM items ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+    return [{"id": r[0], "title": r[1], "price": r[2], "currency": r[3], "condition": r[4], "status": r[5], "created_at": r[6], "post_time": r[7]} for r in rows]
+
+# รัน Worker เบื้องหลัง
 @app.on_event("startup")
 def startup_event():
     def worker_loop():
@@ -99,14 +110,7 @@ async def submit_item(
             f.write(content)
         saved_paths.append(str(target_path))
 
-    # ดึง User ID ล่าสุด
-    conn = db.sqlite3.connect(db.DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM items WHERE user_id != 'web_form' ORDER BY id DESC LIMIT 1")
-    user_row = c.fetchone()
-    conn.close()
-    
-    line_user_id = user_row[0] if user_row else "web_form"
+    line_user_id = DEFAULT_USER_ID
 
     item_id = db.add_queued_item(
         user_id=line_user_id,
@@ -117,27 +121,26 @@ async def submit_item(
         condition=condition
     )
 
-    if line_user_id and line_user_id != "web_form":
-        try:
-            with ApiClient(configuration) as api_client:
-                line_bot_api = MessagingApi(api_client)
-                msg = (
-                    "🎉 ได้รับการ์ดใหม่เข้าคิวเรียบร้อยครับ!\n\n"
-                    f"🏷️ ชื่อ: {title}\n"
-                    f"💰 ราคา: ${price:.2f} {currency}\n"
-                    f"🔍 สภาพ: {condition}\n"
-                    f"📸 จำนวนรูป: {len(saved_paths)} รูป\n"
-                    f"🆔 คิวที่: #{item_id}\n\n"
-                    "⏰ ระบบกำลังเตรียมส่งข้อมูลขึ้น eBay ให้ทันทีครับ!"
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            msg = (
+                "🎉 ได้รับการ์ดใหม่เข้าคิวเรียบร้อยครับ!\n\n"
+                f"🏷️ ชื่อ: {title}\n"
+                f"💰 ราคา: ${price:.2f} {currency}\n"
+                f"🔍 สภาพ: {condition}\n"
+                f"📸 จำนวนรูป: {len(saved_paths)} รูป\n"
+                f"🆔 คิวที่: #{item_id}\n\n"
+                "⏰ กำลังส่งขึ้นไปโพสต์ขายบน eBay ให้ทันทีครับ!"
+            )
+            line_bot_api.push_message(
+                PushMessageRequest(
+                    to=line_user_id,
+                    messages=[TextMessage(text=msg)]
                 )
-                line_bot_api.push_message(
-                    PushMessageRequest(
-                        to=line_user_id,
-                        messages=[TextMessage(text=msg)]
-                    )
-                )
-        except Exception as e:
-            print(f"[!] Push notification error: {e}")
+            )
+    except Exception as e:
+        print(f"[!] Push notification error: {e}")
 
     return {
         "success": True,
@@ -199,16 +202,21 @@ def handle_text(event: MessageEvent):
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
 
-        if text.lower() in ["คิว", "ดูคิว", "queue", "status"]:
-            queued = db.get_queued_items()
-            if not queued:
-                msg = f"📭 ยังไม่มีรายการที่รอโพสต์ในคิวครับ\n\nแตะที่นี่เพื่อลงขายการ์ด:\n{LIFF_URL}"
+        if text.lower() in ["คิว", "ดูคิว", "queue", "status", "เช็ค", "ประวัติ"]:
+            conn = db.sqlite3.connect(db.DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT id, title, price, currency, status, post_time FROM items ORDER BY id DESC LIMIT 5")
+            items = c.fetchall()
+            conn.close()
+
+            if not items:
+                msg = f"📭 ยังไม่มีรายการสินค้าในระบบครับ\n\nแตะที่นี่เพื่อลงขายการ์ด:\n{LIFF_URL}"
             else:
-                msg = f"📋 รายการในคิวรอโพสต์ ({len(queued)} รายการ):\n"
-                for idx, item in enumerate(queued, 1):
-                    item_id, title, price, currency, images, status = item
-                    img_count = len(images.split(";")) if images else 0
-                    msg += f"\n{idx}. {title}\n   💰 ${price} {currency} ({img_count} รูป)"
+                msg = "📋 รายการสินค้าล่าสุดในระบบ:\n"
+                for item in items:
+                    i_id, i_title, i_price, i_curr, i_status, i_time = item
+                    status_icon = "⏳ รอโพสต์" if i_status == "QUEUED" else ("✅ โพสต์สำเร็จ" if i_status == "POSTED" else "⚠️ ไม่สำเร็จ")
+                    msg += f"\n#{i_id} {i_title} (${i_price} {i_curr})\n   สถานะ: {status_icon}"
                 msg += f"\n\n➕ เพิ่มการ์ดใหม่ได้ที่:\n{LIFF_URL}"
             
             line_bot_api.reply_message(
@@ -219,7 +227,6 @@ def handle_text(event: MessageEvent):
             )
             return
 
-        # คำสั่งลงสินค้า
         if text.lower() in ["ลงขาย", "ลงสินค้า", "ขาย", "เพิ่ม", "เริ่ม", "add", "new", "form", "1"]:
             msg = (
                 "🃏 แตะที่ลิงก์ด้านล่างเพื่อเปิดหน้าลงขายใน LINE ได้เลยครับ:\n\n"
@@ -234,7 +241,6 @@ def handle_text(event: MessageEvent):
             )
             return
 
-        # ค่าเริ่มต้น
         msg = (
             "👋 ยินดีต้อนรับสู่ระบบลงขายสินค้า eBay อัตโนมัติ (Online 24 ชม.)!\n\n"
             "✨ แตะเพื่อเปิดหน้าลงขายการ์ดใน LINE ได้เลยครับ:\n"

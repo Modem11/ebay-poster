@@ -100,22 +100,12 @@ def map_condition(condition_str: str):
     return 4000, descriptors
 
 def notify_line(user_id: str, message: str):
-    if not user_id or user_id == "web_form":
-        conn = db.sqlite3.connect(db.DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM items WHERE user_id != 'web_form' ORDER BY id DESC LIMIT 1")
-        row = c.fetchone()
-        conn.close()
-        if row:
-            user_id = row[0]
-        else:
-            return
-
+    target_id = user_id if (user_id and user_id != "web_form") else "U65d1bc34fbca88c47dfb4be576cb5218"
     try:
         with ApiClient(line_config) as api:
             bot = MessagingApi(api)
             bot.push_message(PushMessageRequest(
-                to=user_id,
+                to=target_id,
                 messages=[TextMessage(text=message)]
             ))
     except Exception as e:
